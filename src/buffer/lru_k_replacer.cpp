@@ -19,13 +19,13 @@ LRUKNode::LRUKNode(size_t k, frame_id_t fid, bool is_evictable) : k_(k), fid_(fi
 
 auto LRUKNode::ReachK() const -> bool { return history_.size() >= k_; }
 
-auto LRUKNode::GetTimestamp() const -> size_t { return history_.size() == 0 ? 0 : history_.back(); }
+auto LRUKNode::GetTimestamp() const -> size_t { return history_.empty() ? 0 : history_.back(); }
 
-void LRUKNode::PutTimestamp(size_t st) {
+void LRUKNode::PutTimestamp(size_t ts) {
   if (history_.size() == k_) {
     history_.pop_back();
   }
-  history_.push_front(st);
+  history_.push_front(ts);
 }
 
 auto LRUKNode::SetEvictable(bool set_evictable) -> int {

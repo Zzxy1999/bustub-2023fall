@@ -190,8 +190,8 @@ class BufferPoolManager {
   std::unique_ptr<LRUKReplacer> replacer_;
   /** List of free frames that don't have any pages on them. */
   std::list<frame_id_t> free_list_;
-  /** Protect page_table_ */
-  std::mutex map_latch_;
+  /** Protect page_table_ & pages */
+  std::mutex idx_latch_;
   /** Protect free_list_ */
   std::mutex list_latch_;
 
@@ -210,8 +210,9 @@ class BufferPoolManager {
   }
 
   // TODO(student): You may add additional private members and helper functions
-  auto SearchList() -> frame_id_t;
-  auto SearchMap() -> frame_id_t;
-  void PageAlloc(frame_id_t fid, page_id_t page_id);
+  auto ListAlloc() -> frame_id_t;
+  auto MapAlloc() -> frame_id_t;
+  auto MapSearch(page_id_t page_id, bool is_fetch = false) -> frame_id_t;
+  auto DiskSearch(page_id_t page_id) -> frame_id_t;
 };
 }  // namespace bustub

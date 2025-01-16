@@ -44,7 +44,7 @@ class LRUKNode {
 
   std::list<size_t> history_;
   size_t k_;
-  frame_id_t fid_;
+  [[maybe_unused]] frame_id_t fid_;
   bool is_evictable_{false};
 };
 
