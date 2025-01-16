@@ -190,8 +190,10 @@ class BufferPoolManager {
   std::unique_ptr<LRUKReplacer> replacer_;
   /** List of free frames that don't have any pages on them. */
   std::list<frame_id_t> free_list_;
-  /** This latch protects shared data structures. We recommend updating this comment to describe what it protects. */
-  std::mutex latch_;
+  /** Protect page_table_ */
+  std::mutex map_latch_;
+  /** Protect free_list_ */
+  std::mutex list_latch_;
 
   /**
    * @brief Allocate a page on disk. Caller should acquire the latch before calling this function.
@@ -208,5 +210,8 @@ class BufferPoolManager {
   }
 
   // TODO(student): You may add additional private members and helper functions
+  auto SearchList() -> frame_id_t;
+  auto SearchMap() -> frame_id_t;
+  void PageAlloc(frame_id_t fid, page_id_t page_id);
 };
 }  // namespace bustub

@@ -22,10 +22,6 @@ BufferPoolManager::BufferPoolManager(size_t pool_size, DiskManager *disk_manager
                                      LogManager *log_manager)
     : pool_size_(pool_size), disk_scheduler_(std::make_unique<DiskScheduler>(disk_manager)), log_manager_(log_manager) {
   // TODO(students): remove this line after you have implemented the buffer pool manager
-  throw NotImplementedException(
-      "BufferPoolManager is not implemented yet. If you have finished implementing BPM, please remove the throw "
-      "exception line in `buffer_pool_manager.cpp`.");
-
   // we allocate a consecutive memory space for the buffer pool
   pages_ = new Page[pool_size_];
   replacer_ = std::make_unique<LRUKReplacer>(pool_size, replacer_k);
@@ -63,5 +59,45 @@ auto BufferPoolManager::FetchPageRead(page_id_t page_id) -> ReadPageGuard { retu
 auto BufferPoolManager::FetchPageWrite(page_id_t page_id) -> WritePageGuard { return {this, nullptr}; }
 
 auto BufferPoolManager::NewPageGuarded(page_id_t *page_id) -> BasicPageGuard { return {this, nullptr}; }
+
+auto BufferPoolManager::SearchList() -> frame_id_t {
+  std::lock_guard<std::mutex> lk(list_latch_);
+  if (free_list_.empty()) {
+    return -1;
+  }
+  auto fid = free_list_.front();
+  free_list_.pop_front();
+  return fid;
+}
+
+auto BufferPoolManager::SearchMap() -> frame_id_t {
+  frame_id_t fid;
+  if (!replacer_->Evict(&fid)) {
+    return -1;
+  }
+  auto old_page = pages_ + fid;
+
+  // lock lock
+  map_latch_.lock();
+  old_page->WLatch();
+  auto page_id = old_page->GetPageId();
+  page_table_.erase(page_id);
+  map_latch_.unlock();
+
+  // free evicted page
+  if (old_page->IsDirty()) {
+    auto promise = disk_scheduler_->CreatePromise();
+    auto future = promise.get_future();
+    disk_scheduler_->Schedule({true, old_page->GetData(), page_id, std::move(promise)});
+    BUSTUB_ASSERT(future.get() == true, "evict dirty write");
+  }
+  old_page->ResetMemory();
+  old_page->WUnlatch();
+  
+
+  return fid;
+}
+
+void BufferPoolManager::PageAlloc(frame_id_t fid, page_id_t page_id) {}
 
 }  // namespace bustub
