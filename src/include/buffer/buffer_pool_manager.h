@@ -212,7 +212,8 @@ class BufferPoolManager {
   // TODO(student): You may add additional private members and helper functions
   auto ListAlloc() -> frame_id_t;
   auto MapAlloc() -> frame_id_t;
-  auto MapSearch(page_id_t page_id, bool is_fetch = false) -> frame_id_t;
-  auto DiskSearch(page_id_t page_id) -> frame_id_t;
+  auto MapFetch(page_id_t page_id) -> frame_id_t;
+  auto DiskFetch(page_id_t page_id) -> frame_id_t;
+  auto MapFind(page_id_t page_id) -> Page *;
 };
 }  // namespace bustub
