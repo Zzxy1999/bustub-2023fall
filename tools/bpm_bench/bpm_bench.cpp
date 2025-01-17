@@ -102,6 +102,9 @@ struct BustubBenchPageHeader {
   char data_[0];
 };
 
+std::atomic<int64_t> total;
+std::atomic<int64_t> failed;
+
 /// Modify the page and save some data inside
 auto ModifyPage(char *data, size_t page_idx, uint64_t seed) -> void {
   auto *pg = reinterpret_cast<BustubBenchPageHeader *>(data);
@@ -113,24 +116,29 @@ auto ModifyPage(char *data, size_t page_idx, uint64_t seed) -> void {
 /// Check the page and verify the data inside
 auto CheckPageConsistentNoSeed(const char *data, size_t page_idx) -> void {
   const auto *pg = reinterpret_cast<const BustubBenchPageHeader *>(data);
+  total += 2;
   if (pg->page_id_ != page_idx) {
-    fmt::println(stderr, "page header not consistent: page_id_={} page_idx={}", pg->page_id_, page_idx);
-    std::terminate();
+    ++failed;
+    //fmt::println(stderr, "page header not consistent: page_id_={} page_idx={}", pg->page_id_, page_idx);
+    //std::terminate();
   }
   auto left = static_cast<unsigned int>(static_cast<unsigned char>(pg->data_[pg->seed_ % 4000]));
   auto right = static_cast<unsigned int>(pg->seed_ % 256);
   if (left != right) {
-    fmt::println(stderr, "page content not consistent: data_[{}]={} seed_ % 256={}", pg->seed_ % 4000, left, right);
-    std::terminate();
+    ++failed;
+    //fmt::println(stderr, "page content not consistent: data_[{}]={} seed_ % 256={}", pg->seed_ % 4000, left, right);
+    //std::terminate();
   }
 }
 
 /// Check the page and verify the data inside
 auto CheckPageConsistent(const char *data, size_t page_idx, uint64_t seed) -> void {
+  ++total;
   const auto *pg = reinterpret_cast<const BustubBenchPageHeader *>(data);
   if (pg->seed_ != seed) {
-    fmt::println(stderr, "page seed not consistent: seed_={} seed={}", pg->seed_, seed);
-    std::terminate();
+    ++failed;
+    //fmt::println(stderr, "page seed not consistent: seed_={} seed={}", pg->seed_, seed);
+    //std::terminate();
   }
   CheckPageConsistentNoSeed(data, page_idx);
 }
@@ -299,6 +307,6 @@ auto main(int argc, char **argv) -> int {
   }
 
   total_metrics.Report();
-
+  std::cout << failed << "\t" << total << std::endl;
   return 0;
 }

@@ -35,6 +35,7 @@ BufferPoolManager::BufferPoolManager(size_t pool_size, DiskManager *disk_manager
 BufferPoolManager::~BufferPoolManager() { delete[] pages_; }
 
 auto BufferPoolManager::NewPage(page_id_t *page_id) -> Page * {
+  std::lock_guard<std::mutex> lk(latch_);
   frame_id_t frame_id;
   if ((frame_id = ListAlloc()) == -1) {
     if ((frame_id = MapAlloc()) == -1) {
@@ -44,23 +45,23 @@ auto BufferPoolManager::NewPage(page_id_t *page_id) -> Page * {
   // alloc a page and return
   *page_id = AllocatePage();
   auto page = pages_ + frame_id;
-  page->WLatch();
+  // page->WLatch();
   BUSTUB_ASSERT(page->page_id_ == INVALID_PAGE_ID, "NewPage: page_id");
   BUSTUB_ASSERT(page->IsDirty() == false, "NewPage: is_dirty");
   BUSTUB_ASSERT(page->GetPinCount() == 0, "NewPage: pin_count");
   page->page_id_ = *page_id;
   page->pin_count_ = 1;
-  page->WUnlatch();
+  // page->WUnLatch();
   // first page then idx
-  idx_latch_.lock();
   replacer_->RecordAccess(frame_id);
   replacer_->SetEvictable(frame_id, false);
   page_table_.insert({*page_id, frame_id});
-  idx_latch_.unlock();
+  ;
   return page;
 }
 
 auto BufferPoolManager::FetchPage(page_id_t page_id, [[maybe_unused]] AccessType access_type) -> Page * {
+  std::lock_guard<std::mutex> lk(latch_);
   frame_id_t frame_id;
   if ((frame_id = MapFetch(page_id)) == -1) {
     if ((frame_id = DiskFetch(page_id)) == -1) {
@@ -71,14 +72,13 @@ auto BufferPoolManager::FetchPage(page_id_t page_id, [[maybe_unused]] AccessType
 }
 
 auto BufferPoolManager::UnpinPage(page_id_t page_id, bool is_dirty, [[maybe_unused]] AccessType access_type) -> bool {
-  std::lock_guard<std::mutex> lk(idx_latch_);
+  std::lock_guard<std::mutex> lk(latch_);
   auto page = MapFind(page_id);
   if (page == nullptr) {
     return false;
   }
-  page->WLatch();
+  // page->WLatch();
   if (page->GetPinCount() == 0) {
-    page->WUnlatch();
     return false;
   }
   page->is_dirty_ |= is_dirty;
@@ -86,70 +86,65 @@ auto BufferPoolManager::UnpinPage(page_id_t page_id, bool is_dirty, [[maybe_unus
     replacer_->SetEvictable(page - pages_, true);
   }
   BUSTUB_ASSERT(page->GetPinCount() >= 0, "UnpinPage: pin_count");
-  page->WUnlatch();
+  // page->WUnLatch();
   return true;
 }
 
 auto BufferPoolManager::FlushPage(page_id_t page_id) -> bool {
-  std::lock_guard<std::mutex> lk(idx_latch_);
+  std::lock_guard<std::mutex> lk(latch_);
   auto page = MapFind(page_id);
   if (page == nullptr) {
     return false;
   }
   auto promise = disk_scheduler_->CreatePromise();
   auto future = promise.get_future();
-  page->WLatch();
+  // page->WLatch();
   disk_scheduler_->Schedule({true, page->GetData(), page_id, std::move(promise)});
   BUSTUB_ASSERT(future.get() == true, "SearchMap: dirty write");
   page->is_dirty_ = false;
-  page->WUnlatch();
+  // page->WUnLatch();
   return true;
 }
 
 void BufferPoolManager::FlushAllPages() {
-  std::lock_guard<std::mutex> lk(idx_latch_);
+  std::lock_guard<std::mutex> lk(latch_);
   for (auto p : page_table_) {
     auto page = pages_ + p.second;
     auto promise = disk_scheduler_->CreatePromise();
     auto future = promise.get_future();
-    page->WLatch();
+    // page->WLatch();
     disk_scheduler_->Schedule({true, page->GetData(), p.first, std::move(promise)});
     BUSTUB_ASSERT(future.get() == true, "SearchMap: dirty write");
     page->is_dirty_ = false;
-    page->WUnlatch();
+    // page->WUnLatch();
   }
 }
 
 auto BufferPoolManager::DeletePage(page_id_t page_id) -> bool {
-  idx_latch_.lock();
+  std::lock_guard<std::mutex> lk(latch_);
   auto page = MapFind(page_id);
   if (page == nullptr) {
-    idx_latch_.unlock();
     return true;
   }
 
   auto frame_id = page - pages_;
-  page->WLatch();
+  // page->WLatch();
   if (page->GetPinCount() > 0) {
-    page->WUnlatch();
-    idx_latch_.unlock();
     return false;
   }
   page_table_.erase(page_id);
   replacer_->Remove(frame_id);
-  idx_latch_.unlock();
 
   page->is_dirty_ = false;
   page->page_id_ = INVALID_PAGE_ID;
   page->pin_count_ = 0;
   page->ResetMemory();
-  page->WUnlatch();
+  // page->WUnLatch();
 
-  list_latch_.lock();
   free_list_.push_front(frame_id);
-  list_latch_.unlock();
 
   DeallocatePage(page_id);
+
   return true;
 }
 
@@ -164,7 +159,6 @@ auto BufferPoolManager::FetchPageWrite(page_id_t page_id) -> WritePageGuard { re
 auto BufferPoolManager::NewPageGuarded(page_id_t *page_id) -> BasicPageGuard { return {this, nullptr}; }
 
 auto BufferPoolManager::ListAlloc() -> frame_id_t {
-  std::lock_guard<std::mutex> lk(list_latch_);
   if (free_list_.empty()) {
     return -1;
   }
@@ -174,17 +168,16 @@ auto BufferPoolManager::ListAlloc() -> frame_id_t {
 }
 
 auto BufferPoolManager::MapAlloc() -> frame_id_t {
-  idx_latch_.lock();
   frame_id_t frame_id;
   if (!replacer_->Evict(&frame_id)) {
-    idx_latch_.unlock();
     return -1;
   }
   auto page = pages_ + frame_id;
+  // page->WLatch();
   auto page_id = page->GetPageId();
   page_table_.erase(page_id);
+
   // safe to unlock, cause no one can attach this page through page_id
-  idx_latch_.unlock();
 
   BUSTUB_ASSERT(page->GetPinCount() == 0, "SearchMap: pin_count");
   // no need to lock, cause no one hold this page or find this page
@@ -197,26 +190,23 @@ auto BufferPoolManager::MapAlloc() -> frame_id_t {
   }
   page->page_id_ = INVALID_PAGE_ID;
   page->ResetMemory();
+  // page->WUnLatch();
   // safe, frame_id not in free_list
   return frame_id;
 }
 
 auto BufferPoolManager::MapFetch(page_id_t page_id) -> frame_id_t {
-  std::lock_guard<std::mutex> lk(idx_latch_);
   auto iter = page_table_.find(page_id);
   if (iter == page_table_.end()) {
     return -1;
   }
   auto frame_id = iter->second;
   auto page = pages_ + frame_id;
-  page->WLatch();
+  // page->WLatch();
   BUSTUB_ASSERT(page->GetPinCount() >= 0, "MapFetch: pin_count");
   ++page->pin_count_;
+  // page->WUnLatch();
   replacer_->SetEvictable(frame_id, false);
-  // if (++page->pin_count_ == 1) {
-  //   replacer_->SetEvictable(frame_id, false);
-  // }
-  page->WUnlatch();
   replacer_->RecordAccess(frame_id);
   // safe, frame must be unevictable, cause pin_count_ always >= 1 until this thread unpin
   return frame_id;
@@ -231,7 +221,7 @@ auto BufferPoolManager::DiskFetch(page_id_t page_id) -> frame_id_t {
   }
   auto page = pages_ + frame_id;
   // safe
-  page->WLatch();
+  // page->WLatch();
   auto promise = disk_scheduler_->CreatePromise();
   auto future = promise.get_future();
   disk_scheduler_->Schedule({false, page->GetData(), page_id, std::move(promise)});
@@ -240,13 +230,11 @@ auto BufferPoolManager::DiskFetch(page_id_t page_id) -> frame_id_t {
   BUSTUB_ASSERT(page->GetPinCount() == 0, "DiskSearch: pin_count");
   page->page_id_ = page_id;
   page->pin_count_ = 1;
-  page->WUnlatch();
+  // page->WUnLatch();
   // safe
-  idx_latch_.lock();
   replacer_->RecordAccess(frame_id);
   replacer_->SetEvictable(frame_id, false);
   page_table_.insert({page_id, frame_id});
-  idx_latch_.unlock();
   return frame_id;
 }
 

@@ -190,10 +190,9 @@ class BufferPoolManager {
   std::unique_ptr<LRUKReplacer> replacer_;
   /** List of free frames that don't have any pages on them. */
   std::list<frame_id_t> free_list_;
-  /** Protect page_table_ & pages */
-  std::mutex idx_latch_;
-  /** Protect free_list_ */
-  std::mutex list_latch_;
+
+  /** lock */
+  std::mutex latch_;
 
   /**
    * @brief Allocate a page on disk. Caller should acquire the latch before calling this function.
