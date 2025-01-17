@@ -19,21 +19,33 @@ namespace bustub {
 DiskScheduler::DiskScheduler(DiskManager *disk_manager) : disk_manager_(disk_manager) {
   // TODO(P1): remove this line after you have implemented the disk scheduler API
   // Spawn the background thread
-  background_thread_.emplace([&] { StartWorkerThread(); });
+  for (size_t i = 0; i < K_THREADS; ++i) {
+    request_queue_.emplace_back(std::make_shared<Chan>());
+  }
+
+  for (size_t i = 0; i < K_THREADS; ++i) {
+    threads_.emplace_back([=] { StartWorkerThread(i); });
+  }
 }
 
 DiskScheduler::~DiskScheduler() {
   // Put a `std::nullopt` in the queue to signal to exit the loop
-  request_queue_.Put(std::nullopt);
-  if (background_thread_.has_value()) {
-    background_thread_->join();
+  for (size_t i = 0; i < K_THREADS; ++i) {
+    request_queue_[i]->Put(std::nullopt);
+  }
+  for (auto &thread : threads_) {
+    thread.join();
   }
 }
 
-void DiskScheduler::Schedule(DiskRequest r) { request_queue_.Put(std::optional<DiskRequest>(std::move(r))); }
+void DiskScheduler::Schedule(DiskRequest r) {
+  auto idx = r.page_id_ % K_THREADS;
+  request_queue_[idx]->Put(std::optional<DiskRequest>(std::move(r)));
+}
 
-void DiskScheduler::StartWorkerThread() {
-  while (auto opt = request_queue_.Get()) {
+void DiskScheduler::StartWorkerThread(size_t idx) {
+  auto queue = request_queue_[idx];
+  while (auto opt = queue->Get()) {
     if (!opt.has_value()) {
       break;
     }
