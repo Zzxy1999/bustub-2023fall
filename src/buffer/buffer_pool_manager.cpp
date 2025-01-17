@@ -45,13 +45,8 @@ auto BufferPoolManager::NewPage(page_id_t *page_id) -> Page * {
   // alloc a page and return
   *page_id = AllocatePage();
   auto page = pages_ + frame_id;
-  // page->WLatch();
-  BUSTUB_ASSERT(page->page_id_ == INVALID_PAGE_ID, "NewPage: page_id");
-  BUSTUB_ASSERT(page->IsDirty() == false, "NewPage: is_dirty");
-  BUSTUB_ASSERT(page->GetPinCount() == 0, "NewPage: pin_count");
   page->page_id_ = *page_id;
   page->pin_count_ = 1;
-  // page->WUnLatch();
   // first page then idx
   replacer_->RecordAccess(frame_id);
   replacer_->SetEvictable(frame_id, false);
@@ -77,7 +72,6 @@ auto BufferPoolManager::UnpinPage(page_id_t page_id, bool is_dirty, [[maybe_unus
   if (page == nullptr) {
     return false;
   }
-  // page->WLatch();
   if (page->GetPinCount() == 0) {
     return false;
   }
@@ -85,8 +79,6 @@ auto BufferPoolManager::UnpinPage(page_id_t page_id, bool is_dirty, [[maybe_unus
   if (--page->pin_count_ == 0) {
     replacer_->SetEvictable(page - pages_, true);
   }
-  BUSTUB_ASSERT(page->GetPinCount() >= 0, "UnpinPage: pin_count");
-  // page->WUnLatch();
   return true;
 }
 
@@ -98,11 +90,9 @@ auto BufferPoolManager::FlushPage(page_id_t page_id) -> bool {
   }
   auto promise = disk_scheduler_->CreatePromise();
   auto future = promise.get_future();
-  // page->WLatch();
   disk_scheduler_->Schedule({true, page->GetData(), page_id, std::move(promise)});
-  BUSTUB_ASSERT(future.get() == true, "SearchMap: dirty write");
+  future.get();
   page->is_dirty_ = false;
-  // page->WUnLatch();
   return true;
 }
 
@@ -112,11 +102,9 @@ void BufferPoolManager::FlushAllPages() {
     auto page = pages_ + p.second;
     auto promise = disk_scheduler_->CreatePromise();
     auto future = promise.get_future();
-    // page->WLatch();
     disk_scheduler_->Schedule({true, page->GetData(), p.first, std::move(promise)});
-    BUSTUB_ASSERT(future.get() == true, "SearchMap: dirty write");
+    future.get();
     page->is_dirty_ = false;
-    // page->WUnLatch();
   }
 }
 
@@ -128,7 +116,6 @@ auto BufferPoolManager::DeletePage(page_id_t page_id) -> bool {
   }
 
   auto frame_id = page - pages_;
-  // page->WLatch();
   if (page->GetPinCount() > 0) {
     return false;
   }
@@ -139,7 +126,6 @@ auto BufferPoolManager::DeletePage(page_id_t page_id) -> bool {
   page->page_id_ = INVALID_PAGE_ID;
   page->pin_count_ = 0;
   page->ResetMemory();
-  // page->WUnLatch();
 
   free_list_.push_front(frame_id);
 
@@ -173,24 +159,21 @@ auto BufferPoolManager::MapAlloc() -> frame_id_t {
     return -1;
   }
   auto page = pages_ + frame_id;
-  // page->WLatch();
   auto page_id = page->GetPageId();
   page_table_.erase(page_id);
 
   // safe to unlock, cause no one can attach this page through page_id
 
-  BUSTUB_ASSERT(page->GetPinCount() == 0, "SearchMap: pin_count");
   // no need to lock, cause no one hold this page or find this page
   if (page->IsDirty()) {
     auto promise = disk_scheduler_->CreatePromise();
     auto future = promise.get_future();
     disk_scheduler_->Schedule({true, page->GetData(), page_id, std::move(promise)});
-    BUSTUB_ASSERT(future.get() == true, "SearchMap: dirty write");
+    future.get();
     page->is_dirty_ = false;
   }
   page->page_id_ = INVALID_PAGE_ID;
   page->ResetMemory();
-  // page->WUnLatch();
   // safe, frame_id not in free_list
   return frame_id;
 }
@@ -202,11 +185,9 @@ auto BufferPoolManager::MapFetch(page_id_t page_id) -> frame_id_t {
   }
   auto frame_id = iter->second;
   auto page = pages_ + frame_id;
-  // page->WLatch();
-  BUSTUB_ASSERT(page->GetPinCount() >= 0, "MapFetch: pin_count");
-  ++page->pin_count_;
-  // page->WUnLatch();
-  replacer_->SetEvictable(frame_id, false);
+  if (++page->pin_count_ == 1) {
+    replacer_->SetEvictable(frame_id, false);
+  }
   replacer_->RecordAccess(frame_id);
   // safe, frame must be unevictable, cause pin_count_ always >= 1 until this thread unpin
   return frame_id;
@@ -221,16 +202,12 @@ auto BufferPoolManager::DiskFetch(page_id_t page_id) -> frame_id_t {
   }
   auto page = pages_ + frame_id;
   // safe
-  // page->WLatch();
   auto promise = disk_scheduler_->CreatePromise();
   auto future = promise.get_future();
   disk_scheduler_->Schedule({false, page->GetData(), page_id, std::move(promise)});
-  BUSTUB_ASSERT(future.get() == true, "DiskSearch: write page");
-  BUSTUB_ASSERT(page->IsDirty() == false, "DiskSearch: dirty page");
-  BUSTUB_ASSERT(page->GetPinCount() == 0, "DiskSearch: pin_count");
+  future.get();
   page->page_id_ = page_id;
   page->pin_count_ = 1;
-  // page->WUnLatch();
   // safe
   replacer_->RecordAccess(frame_id);
   replacer_->SetEvictable(frame_id, false);
