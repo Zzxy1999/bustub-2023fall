@@ -36,31 +36,35 @@ BufferPoolManager::BufferPoolManager(size_t pool_size, DiskManager *disk_manager
 BufferPoolManager::~BufferPoolManager() { delete[] pages_; }
 
 auto BufferPoolManager::NewPage(page_id_t *page_id) -> Page * {
-  std::lock_guard<std::mutex> lk(latch_);
   frame_id_t frame_id;
   if ((frame_id = ListAlloc()) == -1) {
     if ((frame_id = MapAlloc()) == -1) {
       return nullptr;
     }
   }
-  // alloc a page and return
+
   *page_id = AllocatePage();
   auto page = pages_ + frame_id;
   page->page_id_ = *page_id;
   page->pin_count_ = 1;
-  // first page then idx
+  PgUnlock(frame_id);
+
+  MapLock();
   replacer_->RecordAccess(frame_id);
   replacer_->SetEvictable(frame_id, false);
   page_table_.insert({*page_id, frame_id});
-  ;
+  BUSTUB_ASSERT(page_table_.size() + free_list_.size() == pool_size_, "size");
+  MapUnlock();
   return page;
 }
 
 auto BufferPoolManager::FetchPage(page_id_t page_id, [[maybe_unused]] AccessType access_type) -> Page * {
-  std::lock_guard<std::mutex> lk(latch_);
   frame_id_t frame_id;
   if ((frame_id = MapFetch(page_id)) == -1) {
     if ((frame_id = DiskFetch(page_id)) == -1) {
+      int i = 0;
+      int j = i + 2;
+      printf("%d\n", j);
       return nullptr;
     }
   }
@@ -68,18 +72,28 @@ auto BufferPoolManager::FetchPage(page_id_t page_id, [[maybe_unused]] AccessType
 }
 
 auto BufferPoolManager::UnpinPage(page_id_t page_id, bool is_dirty, [[maybe_unused]] AccessType access_type) -> bool {
-  std::lock_guard<std::mutex> lk(latch_);
-  auto page = MapFind(page_id);
-  if (page == nullptr) {
+  MapLock();
+  auto iter = page_table_.find(page_id);
+  if (iter == page_table_.end()) {
+    MapUnlock();
     return false;
   }
+  auto frame_id = iter->second;
+
+  PgLock(frame_id);
+  auto page = pages_ + frame_id;
   if (page->GetPinCount() == 0) {
+    PgUnlock(frame_id);
+    MapUnlock();
     return false;
+  }
+  if (--page->pin_count_ == 0) {
+    replacer_->SetEvictable(frame_id, true);
   }
   page->is_dirty_ |= is_dirty;
-  if (--page->pin_count_ == 0) {
-    replacer_->SetEvictable(page - pages_, true);
-  }
+  PgUnlock(frame_id);
+
+  MapUnlock();
   return true;
 }
 
@@ -146,26 +160,31 @@ auto BufferPoolManager::FetchPageWrite(page_id_t page_id) -> WritePageGuard { re
 auto BufferPoolManager::NewPageGuarded(page_id_t *page_id) -> BasicPageGuard { return {this, nullptr}; }
 
 auto BufferPoolManager::ListAlloc() -> frame_id_t {
+  list_latch_.lock();
   if (free_list_.empty()) {
+    list_latch_.unlock();
     return -1;
   }
   auto frame_id = free_list_.front();
   free_list_.pop_front();
+  list_latch_.unlock();
   return frame_id;
 }
 
 auto BufferPoolManager::MapAlloc() -> frame_id_t {
   frame_id_t frame_id;
+  MapLock();
   if (!replacer_->Evict(&frame_id)) {
+    MapUnlock();
     return -1;
   }
+  PgLock(frame_id);
   auto page = pages_ + frame_id;
   auto page_id = page->GetPageId();
+  BUSTUB_ASSERT(page_table_.find(page_id) != page_table_.end(), "mapalloc");
   page_table_.erase(page_id);
-
-  // safe to unlock, cause no one can attach this page through page_id
-
-  // no need to lock, cause no one hold this page or find this page
+  BUSTUB_ASSERT(page_table_.find(page_id) == page_table_.end(), "mapalloc");
+  MapUnlock();
   if (page->IsDirty()) {
     auto promise = disk_scheduler_->CreatePromise();
     auto future = promise.get_future();
@@ -175,22 +194,28 @@ auto BufferPoolManager::MapAlloc() -> frame_id_t {
   }
   page->page_id_ = INVALID_PAGE_ID;
   page->ResetMemory();
-  // safe, frame_id not in free_list
+  // safe, no one hold this page
+  // PgUnlock(frame_id);
   return frame_id;
 }
 
 auto BufferPoolManager::MapFetch(page_id_t page_id) -> frame_id_t {
+  MapLock();
   auto iter = page_table_.find(page_id);
   if (iter == page_table_.end()) {
+    MapUnlock();
     return -1;
   }
   auto frame_id = iter->second;
+  PgLock(frame_id);
   auto page = pages_ + frame_id;
   if (++page->pin_count_ == 1) {
     replacer_->SetEvictable(frame_id, false);
   }
   replacer_->RecordAccess(frame_id);
-  // safe, frame must be unevictable, cause pin_count_ always >= 1 until this thread unpin
+  PgUnlock(frame_id);
+  MapUnlock();
+  // safe, at least one hold this page
   return frame_id;
 }
 
@@ -201,18 +226,22 @@ auto BufferPoolManager::DiskFetch(page_id_t page_id) -> frame_id_t {
       return -1;
     }
   }
+
   auto page = pages_ + frame_id;
-  // safe
   auto promise = disk_scheduler_->CreatePromise();
   auto future = promise.get_future();
   disk_scheduler_->Schedule({false, page->GetData(), page_id, std::move(promise)});
   future.get();
   page->page_id_ = page_id;
   page->pin_count_ = 1;
-  // safe
+  PgUnlock(frame_id);
+
+  MapLock();
   replacer_->RecordAccess(frame_id);
   replacer_->SetEvictable(frame_id, false);
   page_table_.insert({page_id, frame_id});
+  BUSTUB_ASSERT(page_table_.size() + free_list_.size() == pool_size_, "size");
+  MapUnlock();
   return frame_id;
 }
 
@@ -223,5 +252,15 @@ auto BufferPoolManager::MapFind(page_id_t page_id) -> Page * {
   }
   return pages_ + iter->second;
 };
+
+void BufferPoolManager::MapLock() { latch_.lock(); }
+
+void BufferPoolManager::MapUnlock() { latch_.unlock(); }
+
+void BufferPoolManager::PgLock(frame_id_t frame_id) { page_latch_[frame_id]->lock(); }
+
+void BufferPoolManager::PgUnlock(frame_id_t frame_id) { page_latch_[frame_id]->unlock(); }
+
+
 
 }  // namespace bustub

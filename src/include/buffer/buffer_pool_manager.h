@@ -218,5 +218,10 @@ class BufferPoolManager {
   auto MapFetch(page_id_t page_id) -> frame_id_t;
   auto DiskFetch(page_id_t page_id) -> frame_id_t;
   auto MapFind(page_id_t page_id) -> Page *;
+  
+  inline void MapLock();
+  inline void MapUnlock();
+  inline void PgLock(frame_id_t frame_id);
+  inline void PgUnlock(frame_id_t frame_id);
 };
 }  // namespace bustub
