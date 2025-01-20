@@ -194,6 +194,10 @@ class BufferPoolManager {
   /** lock */
   std::mutex latch_;
 
+  std::mutex list_latch_;
+
+  std::vector<std::shared_ptr<std::mutex>> page_latch_;
+
   /**
    * @brief Allocate a page on disk. Caller should acquire the latch before calling this function.
    * @return the id of the allocated page
