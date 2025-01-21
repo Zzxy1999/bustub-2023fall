@@ -51,7 +51,7 @@ struct DiskRequest {
  */
 class DiskScheduler {
  public:
-  explicit DiskScheduler(DiskManager *disk_manager);
+  explicit DiskScheduler(DiskManager *disk_manager, size_t threads_n = 64);
   ~DiskScheduler();
 
   /**
@@ -84,8 +84,6 @@ class DiskScheduler {
   auto CreatePromise() -> DiskSchedulerPromise { return {}; };
 
  private:
-  static const size_t K_THREADS = 8;
-
   using Chan = Channel<std::optional<DiskRequest>>;
 
   /** Pointer to the disk manager. */
@@ -95,6 +93,8 @@ class DiskScheduler {
   std::vector<std::shared_ptr<Chan>> request_queue_;
   /** The background thread responsible for issuing scheduled requests to the disk manager. */
   std::vector<std::thread> threads_;
+
+  size_t threads_n_;
 };
 
 }  // namespace bustub

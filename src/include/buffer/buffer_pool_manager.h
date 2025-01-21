@@ -28,10 +28,18 @@ namespace bustub {
 
 enum BufferPoolReqType { Unknown, New, Fetch, Unpin, Flush, FlushAll, Delete };
 
+struct BufferPoolWorkerRsp {
+  bool success_{false};
+  Page *page_{nullptr};
+  page_id_t page_id_{-1};
+};
+
+using BufferPoolPromise = std::promise<BufferPoolWorkerRsp>;
+
 struct BufferPoolReq {
   BufferPoolReqType type_{Unknown};
-  std::promise<std::pair<bool, Page *>> callback_;
-  page_id_t *page_id_{nullptr};
+  BufferPoolPromise callback_;
+  page_id_t page_id_{-1};
   bool is_dirty_{false};
   AccessType access_type_{AccessType::Unknown};
 };
@@ -188,8 +196,6 @@ class BufferPoolManager {
   auto DeletePage(page_id_t page_id) -> bool;
   auto DeletePageImpl(page_id_t page_id) -> bool;
 
-  using BufferPoolPromise = std::promise<std::pair<bool, Page *>>;
-
   auto CreatPromise() -> BufferPoolPromise { return {}; }
 
  private:
@@ -215,8 +221,6 @@ class BufferPoolManager {
   std::mutex latch_;
 
   std::mutex list_latch_;
-
-  static const size_t K_THREADS = 8;
 
   using Chan = Channel<std::optional<BufferPoolReq>>;
 

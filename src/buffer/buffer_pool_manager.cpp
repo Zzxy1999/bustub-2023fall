@@ -31,29 +31,35 @@ BufferPoolManager::BufferPoolManager(size_t pool_size, DiskManager *disk_manager
     free_list_.emplace_back(static_cast<int>(i));
   }
 
-  for (size_t i = 0; i < K_THREADS; ++i) {
+  for (size_t i = 0; i < pool_size_ + 1; ++i) {
     req_queue_.emplace_back(std::make_shared<Chan>());
+  }
+
+  for (size_t i = 0; i < pool_size_ + 1; ++i) {
     threads_.emplace_back([=] { StartWorkerThread(i); });
   }
 }
 
-BufferPoolManager::~BufferPoolManager() { 
-  for (size_t i = 0; i < K_THREADS; ++i) {
+BufferPoolManager::~BufferPoolManager() {
+  for (size_t i = 0; i < pool_size_ + 1; ++i) {
     req_queue_[i]->Put(std::nullopt);
   }
+
   for (auto &thread : threads_) {
     thread.join();
   }
-  delete[] pages_; 
+
+  delete[] pages_;
 }
 
 auto BufferPoolManager::NewPage(page_id_t *page_id) -> Page * {
-  size_t idx = rand() % K_THREADS;
+  size_t idx = pool_size_;
   auto promise = CreatPromise();
   auto future = promise.get_future();
-  req_queue_[idx]->Put(std::optional<BufferPoolReq>({BufferPoolReqType::New, std::move(promise), page_id}));
-  auto page = future.get().second;
-  return page;
+  req_queue_[idx]->Put(std::optional<BufferPoolReq>({BufferPoolReqType::New, std::move(promise), -1}));
+  auto ret = future.get();
+  *page_id = ret.page_id_;
+  return ret.page_;
 }
 
 auto BufferPoolManager::NewPageImpl(page_id_t *page_id) -> Page * {
@@ -78,21 +84,18 @@ auto BufferPoolManager::NewPageImpl(page_id_t *page_id) -> Page * {
 }
 
 auto BufferPoolManager::FetchPage(page_id_t page_id, [[maybe_unused]] AccessType access_type) -> Page * {
-  size_t idx = page_id % K_THREADS;
+  size_t idx = page_id % pool_size_;
   auto promise = CreatPromise();
   auto future = promise.get_future();
-  req_queue_[idx]->Put(std::optional<BufferPoolReq>({BufferPoolReqType::Fetch, std::move(promise), &page_id, false, access_type}));
-  auto page = future.get().second;
-  return page;
+  req_queue_[idx]->Put(
+      std::optional<BufferPoolReq>({BufferPoolReqType::Fetch, std::move(promise), page_id, false, access_type}));
+  return future.get().page_;
 }
 
-auto BufferPoolManager::FetchPageImpl(page_id_t page_id, [[maybe_unused]] AccessType access_type) -> Page* {
+auto BufferPoolManager::FetchPageImpl(page_id_t page_id, [[maybe_unused]] AccessType access_type) -> Page * {
   frame_id_t frame_id;
   if ((frame_id = MapFetch(page_id)) == -1) {
     if ((frame_id = DiskFetch(page_id)) == -1) {
-      // int i = 0;
-      // int j = i + 2;
-      // printf("%d\n", j);
       return nullptr;
     }
   }
@@ -100,15 +103,16 @@ auto BufferPoolManager::FetchPageImpl(page_id_t page_id, [[maybe_unused]] Access
 }
 
 auto BufferPoolManager::UnpinPage(page_id_t page_id, bool is_dirty, [[maybe_unused]] AccessType access_type) -> bool {
-  size_t idx = page_id % K_THREADS;
+  size_t idx = page_id % pool_size_;
   auto promise = CreatPromise();
   auto future = promise.get_future();
-  req_queue_[idx]->Put(std::optional<BufferPoolReq>({BufferPoolReqType::Unpin, std::move(promise), &page_id, is_dirty, access_type}));
-  auto ret = future.get().first;
-  return ret;
+  req_queue_[idx]->Put(
+      std::optional<BufferPoolReq>({BufferPoolReqType::Unpin, std::move(promise), page_id, is_dirty, access_type}));
+  return future.get().success_;
 }
 
-auto BufferPoolManager::UnpinPageImpl(page_id_t page_id, bool is_dirty, [[maybe_unused]] AccessType access_type) -> bool {
+auto BufferPoolManager::UnpinPageImpl(page_id_t page_id, bool is_dirty, [[maybe_unused]] AccessType access_type)
+    -> bool {
   MapLock();
   auto iter = page_table_.find(page_id);
   if (iter == page_table_.end()) {
@@ -132,6 +136,14 @@ auto BufferPoolManager::UnpinPageImpl(page_id_t page_id, bool is_dirty, [[maybe_
 }
 
 auto BufferPoolManager::FlushPage(page_id_t page_id) -> bool {
+  size_t idx = page_id % pool_size_;
+  auto promise = CreatPromise();
+  auto future = promise.get_future();
+  req_queue_[idx]->Put(std::optional<BufferPoolReq>({BufferPoolReqType::Flush, std::move(promise), page_id}));
+  return future.get().success_;
+}
+
+auto BufferPoolManager::FlushPageImpl(page_id_t page_id) -> bool {
   std::lock_guard<std::mutex> lk(latch_);
   auto page = MapFind(page_id);
   if (page == nullptr) {
@@ -146,6 +158,14 @@ auto BufferPoolManager::FlushPage(page_id_t page_id) -> bool {
 }
 
 void BufferPoolManager::FlushAllPages() {
+  size_t idx = pool_size_;
+  auto promise = CreatPromise();
+  auto future = promise.get_future();
+  req_queue_[idx]->Put(std::optional<BufferPoolReq>({BufferPoolReqType::FlushAll, std::move(promise)}));
+  future.get();
+}
+
+void BufferPoolManager::FlushAllPagesImpl() {
   std::lock_guard<std::mutex> lk(latch_);
   for (auto p : page_table_) {
     auto page = pages_ + p.second;
@@ -158,6 +178,14 @@ void BufferPoolManager::FlushAllPages() {
 }
 
 auto BufferPoolManager::DeletePage(page_id_t page_id) -> bool {
+  size_t idx = page_id % pool_size_;
+  auto promise = CreatPromise();
+  auto future = promise.get_future();
+  req_queue_[idx]->Put(std::optional<BufferPoolReq>({BufferPoolReqType::Delete, std::move(promise), page_id}));
+  return future.get().success_;
+}
+
+auto BufferPoolManager::DeletePageImpl(page_id_t page_id) -> bool {
   std::lock_guard<std::mutex> lk(latch_);
   auto page = MapFind(page_id);
   if (page == nullptr) {
@@ -176,7 +204,9 @@ auto BufferPoolManager::DeletePage(page_id_t page_id) -> bool {
   page->pin_count_ = 0;
   page->ResetMemory();
 
+  list_latch_.lock();
   free_list_.push_front(frame_id);
+  list_latch_.unlock();
 
   DeallocatePage(page_id);
 
@@ -285,20 +315,31 @@ void BufferPoolManager::MapUnlock() { latch_.unlock(); }
 
 void BufferPoolManager::StartWorkerThread(size_t idx) {
   auto queue = req_queue_[idx];
-  while (auto opt = queue->Get()) {
-    if (!opt.has_value()) {
-      break;
-    }
+  std::optional<BufferPoolReq> opt;
+  while ((opt = queue->Get()) != std::nullopt) {
     auto req = std::move(opt.value());
+    Page *page = nullptr;
     switch (req.type_) {
       case BufferPoolReqType::New:
-        req.callback_.set_value({false, NewPageImpl(req.page_id_)});
+        page_id_t page_id;
+        page = NewPageImpl(&page_id);
+        req.callback_.set_value({false, page, page_id});
         break;
       case BufferPoolReqType::Fetch:
-        req.callback_.set_value({false, FetchPageImpl(*req.page_id_, req.access_type_)});
+        req.callback_.set_value({false, FetchPageImpl(req.page_id_, req.access_type_)});
         break;
       case BufferPoolReqType::Unpin:
-        req.callback_.set_value({UnpinPageImpl(*req.page_id_, req.is_dirty_, req.access_type_), nullptr});
+        req.callback_.set_value({UnpinPageImpl(req.page_id_, req.is_dirty_, req.access_type_), nullptr});
+        break;
+      case BufferPoolReqType::Flush:
+        req.callback_.set_value({FlushPageImpl(req.page_id_), nullptr});
+        break;
+      case BufferPoolReqType::FlushAll:
+        FlushAllPagesImpl();
+        req.callback_.set_value({false, nullptr});
+        break;
+      case BufferPoolReqType::Delete:
+        req.callback_.set_value({DeletePageImpl(req.page_id_), nullptr});
         break;
       default:
         break;

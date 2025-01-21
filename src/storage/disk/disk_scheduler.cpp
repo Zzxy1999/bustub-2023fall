@@ -16,21 +16,22 @@
 
 namespace bustub {
 
-DiskScheduler::DiskScheduler(DiskManager *disk_manager) : disk_manager_(disk_manager) {
+DiskScheduler::DiskScheduler(DiskManager *disk_manager, size_t threads_n)
+    : disk_manager_(disk_manager), threads_n_(threads_n) {
   // TODO(P1): remove this line after you have implemented the disk scheduler API
   // Spawn the background thread
-  for (size_t i = 0; i < K_THREADS; ++i) {
+  for (size_t i = 0; i < threads_n_; ++i) {
     request_queue_.emplace_back(std::make_shared<Chan>());
   }
 
-  for (size_t i = 0; i < K_THREADS; ++i) {
+  for (size_t i = 0; i < threads_n_; ++i) {
     threads_.emplace_back([=] { StartWorkerThread(i); });
   }
 }
 
 DiskScheduler::~DiskScheduler() {
   // Put a `std::nullopt` in the queue to signal to exit the loop
-  for (size_t i = 0; i < K_THREADS; ++i) {
+  for (size_t i = 0; i < threads_n_; ++i) {
     request_queue_[i]->Put(std::nullopt);
   }
   for (auto &thread : threads_) {
@@ -39,7 +40,7 @@ DiskScheduler::~DiskScheduler() {
 }
 
 void DiskScheduler::Schedule(DiskRequest r) {
-  auto idx = r.page_id_ % K_THREADS;
+  auto idx = r.page_id_ % threads_n_;
   request_queue_[idx]->Put(std::optional<DiskRequest>(std::move(r)));
 }
 
