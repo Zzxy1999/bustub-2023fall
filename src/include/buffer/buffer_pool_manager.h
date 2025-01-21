@@ -26,6 +26,16 @@
 
 namespace bustub {
 
+enum BufferPoolReqType { Unknown, New, Fetch, Unpin, Flush, FlushAll, Delete };
+
+struct BufferPoolReq {
+  BufferPoolReqType type_{Unknown};
+  std::promise<std::pair<bool, Page *>> callback_;
+  page_id_t *page_id_{nullptr};
+  bool is_dirty_{false};
+  AccessType access_type_{AccessType::Unknown};
+};
+
 /**
  * BufferPoolManager reads disk pages to and from its internal buffer pool.
  */
@@ -70,6 +80,7 @@ class BufferPoolManager {
    * @return nullptr if no new pages could be created, otherwise pointer to new page
    */
   auto NewPage(page_id_t *page_id) -> Page *;
+  auto NewPageImpl(page_id_t *page_id) -> Page *;
 
   /**
    * TODO(P2): Add implementation
@@ -103,6 +114,7 @@ class BufferPoolManager {
    * @return nullptr if page_id cannot be fetched, otherwise pointer to the requested page
    */
   auto FetchPage(page_id_t page_id, AccessType access_type = AccessType::Unknown) -> Page *;
+  auto FetchPageImpl(page_id_t page_id, AccessType access_type = AccessType::Unknown) -> Page *;
 
   /**
    * TODO(P2): Add implementation
@@ -136,6 +148,7 @@ class BufferPoolManager {
    * @return false if the page is not in the page table or its pin count is <= 0 before this call, true otherwise
    */
   auto UnpinPage(page_id_t page_id, bool is_dirty, AccessType access_type = AccessType::Unknown) -> bool;
+  auto UnpinPageImpl(page_id_t page_id, bool is_dirty, AccessType access_type = AccessType::Unknown) -> bool;
 
   /**
    * TODO(P1): Add implementation
@@ -149,6 +162,7 @@ class BufferPoolManager {
    * @return false if the page could not be found in the page table, true otherwise
    */
   auto FlushPage(page_id_t page_id) -> bool;
+  auto FlushPageImpl(page_id_t page_id) -> bool;
 
   /**
    * TODO(P1): Add implementation
@@ -156,6 +170,7 @@ class BufferPoolManager {
    * @brief Flush all the pages in the buffer pool to disk.
    */
   void FlushAllPages();
+  void FlushAllPagesImpl();
 
   /**
    * TODO(P1): Add implementation
@@ -171,6 +186,11 @@ class BufferPoolManager {
    * @return false if the page exists but could not be deleted, true if the page didn't exist or deletion succeeded
    */
   auto DeletePage(page_id_t page_id) -> bool;
+  auto DeletePageImpl(page_id_t page_id) -> bool;
+
+  using BufferPoolPromise = std::promise<std::pair<bool, Page *>>;
+
+  auto CreatPromise() -> BufferPoolPromise { return {}; }
 
  private:
   /** Number of pages in the buffer pool. */
@@ -196,7 +216,13 @@ class BufferPoolManager {
 
   std::mutex list_latch_;
 
-  std::vector<std::shared_ptr<std::mutex>> page_latch_;
+  static const size_t K_THREADS = 8;
+
+  using Chan = Channel<std::optional<BufferPoolReq>>;
+
+  std::vector<std::shared_ptr<Chan>> req_queue_;
+
+  std::vector<std::thread> threads_;
 
   /**
    * @brief Allocate a page on disk. Caller should acquire the latch before calling this function.
@@ -218,10 +244,11 @@ class BufferPoolManager {
   auto MapFetch(page_id_t page_id) -> frame_id_t;
   auto DiskFetch(page_id_t page_id) -> frame_id_t;
   auto MapFind(page_id_t page_id) -> Page *;
-  
+
   inline void MapLock();
   inline void MapUnlock();
-  inline void PgLock(frame_id_t frame_id);
-  inline void PgUnlock(frame_id_t frame_id);
+
+  void StartWorkerThread(size_t idx);
 };
+
 }  // namespace bustub

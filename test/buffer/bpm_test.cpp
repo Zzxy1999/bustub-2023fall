@@ -14,6 +14,35 @@
 
 namespace bustub {
 
+TEST(BufferPoolManagerTest, SimoleTest0) {
+  const int kPoolSize = 3;
+
+  auto disk_manager = std::make_unique<DiskManagerUnlimitedMemory>();
+  auto bpm = std::make_unique<BufferPoolManager>(kPoolSize, disk_manager.get(), 2);
+
+  for (int i = 0; i < kPoolSize; ++i) {
+    page_id_t page_id;
+    auto p = bpm->NewPage(&page_id);
+    EXPECT_EQ(page_id, i);
+    snprintf(p->GetData(), BUSTUB_PAGE_SIZE, "Hello-%d", i);
+  }
+
+  for (int i = 0; i < kPoolSize; ++i) {
+    EXPECT_TRUE(bpm->UnpinPage(i, true));
+  }
+
+  for (int i = 0; i < kPoolSize; ++i) {
+    EXPECT_FALSE(bpm->UnpinPage(i, false));
+  }
+
+  for (int i = 0; i < kPoolSize; ++i) {
+    auto p = bpm->FetchPage(i);
+    char buf[BUSTUB_PAGE_SIZE];
+    sprintf(buf, "Hello-%d", i);
+    EXPECT_EQ(0, strcmp(p->GetData(), buf));
+  }
+}
+
 TEST(BufferPoolManagerTest, SimpleTest) {
   const int kPoolSize = 3;
 

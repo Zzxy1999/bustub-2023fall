@@ -29,13 +29,34 @@ BufferPoolManager::BufferPoolManager(size_t pool_size, DiskManager *disk_manager
   // Initially, every page is in the free list.
   for (size_t i = 0; i < pool_size_; ++i) {
     free_list_.emplace_back(static_cast<int>(i));
-    page_latch_.emplace_back(std::make_shared<std::mutex>());
+  }
+
+  for (size_t i = 0; i < K_THREADS; ++i) {
+    req_queue_.emplace_back(std::make_shared<Chan>());
+    threads_.emplace_back([=] { StartWorkerThread(i); });
   }
 }
 
-BufferPoolManager::~BufferPoolManager() { delete[] pages_; }
+BufferPoolManager::~BufferPoolManager() { 
+  for (size_t i = 0; i < K_THREADS; ++i) {
+    req_queue_[i]->Put(std::nullopt);
+  }
+  for (auto &thread : threads_) {
+    thread.join();
+  }
+  delete[] pages_; 
+}
 
 auto BufferPoolManager::NewPage(page_id_t *page_id) -> Page * {
+  size_t idx = rand() % K_THREADS;
+  auto promise = CreatPromise();
+  auto future = promise.get_future();
+  req_queue_[idx]->Put(std::optional<BufferPoolReq>({BufferPoolReqType::New, std::move(promise), page_id}));
+  auto page = future.get().second;
+  return page;
+}
+
+auto BufferPoolManager::NewPageImpl(page_id_t *page_id) -> Page * {
   frame_id_t frame_id;
   if ((frame_id = ListAlloc()) == -1) {
     if ((frame_id = MapAlloc()) == -1) {
@@ -47,24 +68,31 @@ auto BufferPoolManager::NewPage(page_id_t *page_id) -> Page * {
   auto page = pages_ + frame_id;
   page->page_id_ = *page_id;
   page->pin_count_ = 1;
-  PgUnlock(frame_id);
 
   MapLock();
   replacer_->RecordAccess(frame_id);
   replacer_->SetEvictable(frame_id, false);
   page_table_.insert({*page_id, frame_id});
-  BUSTUB_ASSERT(page_table_.size() + free_list_.size() == pool_size_, "size");
   MapUnlock();
   return page;
 }
 
 auto BufferPoolManager::FetchPage(page_id_t page_id, [[maybe_unused]] AccessType access_type) -> Page * {
+  size_t idx = page_id % K_THREADS;
+  auto promise = CreatPromise();
+  auto future = promise.get_future();
+  req_queue_[idx]->Put(std::optional<BufferPoolReq>({BufferPoolReqType::Fetch, std::move(promise), &page_id, false, access_type}));
+  auto page = future.get().second;
+  return page;
+}
+
+auto BufferPoolManager::FetchPageImpl(page_id_t page_id, [[maybe_unused]] AccessType access_type) -> Page* {
   frame_id_t frame_id;
   if ((frame_id = MapFetch(page_id)) == -1) {
     if ((frame_id = DiskFetch(page_id)) == -1) {
-      int i = 0;
-      int j = i + 2;
-      printf("%d\n", j);
+      // int i = 0;
+      // int j = i + 2;
+      // printf("%d\n", j);
       return nullptr;
     }
   }
@@ -72,6 +100,15 @@ auto BufferPoolManager::FetchPage(page_id_t page_id, [[maybe_unused]] AccessType
 }
 
 auto BufferPoolManager::UnpinPage(page_id_t page_id, bool is_dirty, [[maybe_unused]] AccessType access_type) -> bool {
+  size_t idx = page_id % K_THREADS;
+  auto promise = CreatPromise();
+  auto future = promise.get_future();
+  req_queue_[idx]->Put(std::optional<BufferPoolReq>({BufferPoolReqType::Unpin, std::move(promise), &page_id, is_dirty, access_type}));
+  auto ret = future.get().first;
+  return ret;
+}
+
+auto BufferPoolManager::UnpinPageImpl(page_id_t page_id, bool is_dirty, [[maybe_unused]] AccessType access_type) -> bool {
   MapLock();
   auto iter = page_table_.find(page_id);
   if (iter == page_table_.end()) {
@@ -80,10 +117,8 @@ auto BufferPoolManager::UnpinPage(page_id_t page_id, bool is_dirty, [[maybe_unus
   }
   auto frame_id = iter->second;
 
-  PgLock(frame_id);
   auto page = pages_ + frame_id;
   if (page->GetPinCount() == 0) {
-    PgUnlock(frame_id);
     MapUnlock();
     return false;
   }
@@ -91,7 +126,6 @@ auto BufferPoolManager::UnpinPage(page_id_t page_id, bool is_dirty, [[maybe_unus
     replacer_->SetEvictable(frame_id, true);
   }
   page->is_dirty_ |= is_dirty;
-  PgUnlock(frame_id);
 
   MapUnlock();
   return true;
@@ -178,12 +212,9 @@ auto BufferPoolManager::MapAlloc() -> frame_id_t {
     MapUnlock();
     return -1;
   }
-  PgLock(frame_id);
   auto page = pages_ + frame_id;
   auto page_id = page->GetPageId();
-  BUSTUB_ASSERT(page_table_.find(page_id) != page_table_.end(), "mapalloc");
   page_table_.erase(page_id);
-  BUSTUB_ASSERT(page_table_.find(page_id) == page_table_.end(), "mapalloc");
   MapUnlock();
   if (page->IsDirty()) {
     auto promise = disk_scheduler_->CreatePromise();
@@ -195,7 +226,6 @@ auto BufferPoolManager::MapAlloc() -> frame_id_t {
   page->page_id_ = INVALID_PAGE_ID;
   page->ResetMemory();
   // safe, no one hold this page
-  // PgUnlock(frame_id);
   return frame_id;
 }
 
@@ -207,13 +237,11 @@ auto BufferPoolManager::MapFetch(page_id_t page_id) -> frame_id_t {
     return -1;
   }
   auto frame_id = iter->second;
-  PgLock(frame_id);
   auto page = pages_ + frame_id;
   if (++page->pin_count_ == 1) {
     replacer_->SetEvictable(frame_id, false);
   }
   replacer_->RecordAccess(frame_id);
-  PgUnlock(frame_id);
   MapUnlock();
   // safe, at least one hold this page
   return frame_id;
@@ -234,13 +262,11 @@ auto BufferPoolManager::DiskFetch(page_id_t page_id) -> frame_id_t {
   future.get();
   page->page_id_ = page_id;
   page->pin_count_ = 1;
-  PgUnlock(frame_id);
 
   MapLock();
   replacer_->RecordAccess(frame_id);
   replacer_->SetEvictable(frame_id, false);
   page_table_.insert({page_id, frame_id});
-  BUSTUB_ASSERT(page_table_.size() + free_list_.size() == pool_size_, "size");
   MapUnlock();
   return frame_id;
 }
@@ -257,10 +283,27 @@ void BufferPoolManager::MapLock() { latch_.lock(); }
 
 void BufferPoolManager::MapUnlock() { latch_.unlock(); }
 
-void BufferPoolManager::PgLock(frame_id_t frame_id) { page_latch_[frame_id]->lock(); }
-
-void BufferPoolManager::PgUnlock(frame_id_t frame_id) { page_latch_[frame_id]->unlock(); }
-
-
+void BufferPoolManager::StartWorkerThread(size_t idx) {
+  auto queue = req_queue_[idx];
+  while (auto opt = queue->Get()) {
+    if (!opt.has_value()) {
+      break;
+    }
+    auto req = std::move(opt.value());
+    switch (req.type_) {
+      case BufferPoolReqType::New:
+        req.callback_.set_value({false, NewPageImpl(req.page_id_)});
+        break;
+      case BufferPoolReqType::Fetch:
+        req.callback_.set_value({false, FetchPageImpl(*req.page_id_, req.access_type_)});
+        break;
+      case BufferPoolReqType::Unpin:
+        req.callback_.set_value({UnpinPageImpl(*req.page_id_, req.is_dirty_, req.access_type_), nullptr});
+        break;
+      default:
+        break;
+    }
+  }
+}
 
 }  // namespace bustub
